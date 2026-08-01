@@ -127,8 +127,15 @@ as $$
   );
 $$;
 
--- profiles: everyone can read all profiles (needed for "performed by" names etc.),
--- only admins can insert/update/delete other users' profiles; users can update their own.
+-- profiles: everyone can read all profiles (needed for "performed by" names etc.);
+-- only admins can insert/update/delete profiles. There is intentionally no
+-- self-update policy: RLS is row-level, not column-level, so a policy like
+-- "id = auth.uid()" would let any user rewrite their own `role` column
+-- (self-promote to admin) since it can't restrict which columns are touched.
+-- The app has no self-service profile editing UI - all profile writes go
+-- through the admin-gated updateUser Server Action. If self-service
+-- name/email editing is added later, gate it with a trigger that rejects
+-- any change to `role` unless the caller is an admin, not a bare RLS policy.
 create policy "profiles are readable by any authenticated user"
   on public.profiles for select
   to authenticated
@@ -139,12 +146,6 @@ create policy "admins can manage all profiles"
   to authenticated
   using (public.is_admin())
   with check (public.is_admin());
-
-create policy "users can update their own profile"
-  on public.profiles for update
-  to authenticated
-  using (id = auth.uid())
-  with check (id = auth.uid());
 
 -- suppliers: anyone logged in can read; only admins can add/edit/remove (matches
 -- the Suppliers page, which is admin-only in the UI).

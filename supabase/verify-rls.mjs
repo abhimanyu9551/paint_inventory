@@ -74,6 +74,23 @@ if (anyAlert) {
   )
 }
 
+// --- Privilege escalation check: a user must NOT be able to change their own
+// role via a direct profiles update, even though "id = auth.uid()" alone
+// would let them touch the row (RLS is row-level, not column-level).
+const {
+  data: { user: userAuthUser },
+} = await asUser.auth.getUser()
+await expectUpdate(
+  "user sets their own role to admin (should be BLOCKED - privilege escalation)",
+  asUser.from("profiles").update({ role: "admin" }).eq("id", userAuthUser.id).select(),
+  false
+)
+const { data: userProfileAfter } = await asUser.from("profiles").select("role").eq("id", userAuthUser.id).single()
+const stillUser = userProfileAfter?.role === "user"
+console.log(`${stillUser ? "PASS" : "FAIL"} - user's role in the database is still "user" after the attempt`)
+if (stillUser) pass++
+else fail++
+
 // --- "supervisor" role: can resolve alerts, still can't touch suppliers ---
 const asSupervisor = await signIn("supervisor@alnoor.com", "Alnoor#Sup3r2026")
 await expect(
