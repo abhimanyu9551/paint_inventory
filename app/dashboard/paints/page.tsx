@@ -1,24 +1,24 @@
-"use client"
-
-import { useAuth } from "@/lib/auth-context"
-import { AuthGuard } from "@/components/auth-guard"
-import { paints, suppliers } from "@/lib/data"
+import { redirect } from "next/navigation"
+import { getSessionUser } from "@/lib/supabase/server"
+import { getPaints, getSuppliers } from "@/lib/data"
 import { PaintTable } from "@/components/paint-table"
 
-export default function PaintsPage() {
-  const { user } = useAuth()
+export default async function PaintsPage() {
+  const user = await getSessionUser()
+  if (!user) redirect("/login")
+  if (!["admin", "supervisor"].includes(user.role)) redirect("/dashboard")
+
+  const [paints, suppliers] = await Promise.all([getPaints(), getSuppliers()])
 
   return (
-    <AuthGuard allowedRoles={["admin", "supervisor"]}>
-      <div className="flex flex-col gap-6">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">Paint Inventory</h1>
-          <p className="text-muted-foreground">
-            Manage your paint stock, add new colors, and track inventory levels
-          </p>
-        </div>
-        {user && <PaintTable paints={[...paints]} suppliers={[...suppliers]} user={user} />}
+    <div className="flex flex-col gap-6">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight text-foreground">Paint Inventory</h1>
+        <p className="text-muted-foreground">
+          Manage your paint stock, add new colors, and track inventory levels
+        </p>
       </div>
-    </AuthGuard>
+      <PaintTable paints={paints} suppliers={suppliers} user={user} />
+    </div>
   )
 }

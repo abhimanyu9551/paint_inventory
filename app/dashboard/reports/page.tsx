@@ -1,7 +1,6 @@
-"use client"
-
-import { AuthGuard } from "@/components/auth-guard"
-import { paints, transactions } from "@/lib/data"
+import { redirect } from "next/navigation"
+import { getSessionUser } from "@/lib/supabase/server"
+import { getPaints, getTransactions } from "@/lib/data"
 import { ReportCharts } from "@/components/report-charts"
 
 const chartColors = [
@@ -10,7 +9,13 @@ const chartColors = [
   "#14b8a6", "#e11d48",
 ]
 
-export default function ReportsPage() {
+export default async function ReportsPage() {
+  const user = await getSessionUser()
+  if (!user) redirect("/login")
+  if (user.role !== "admin") redirect("/dashboard")
+
+  const [paints, transactions] = await Promise.all([getPaints(), getTransactions()])
+
   const usageMap = new Map<string, { consumed: number; restocked: number }>()
   for (const tx of transactions) {
     const paint = paints.find((p) => p.id === tx.paintId)
@@ -47,19 +52,17 @@ export default function ReportsPage() {
   const csvData = csvHeader + csvRows
 
   return (
-    <AuthGuard allowedRoles={["admin"]}>
-      <div className="flex flex-col gap-6">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">Reports</h1>
-          <p className="text-muted-foreground">Analyze inventory usage, trends, and stock distribution</p>
-        </div>
-        <ReportCharts
-          usageData={usageData}
-          trendData={trendData}
-          stockDistribution={stockDistribution}
-          csvData={csvData}
-        />
+    <div className="flex flex-col gap-6">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight text-foreground">Reports</h1>
+        <p className="text-muted-foreground">Analyze inventory usage, trends, and stock distribution</p>
       </div>
-    </AuthGuard>
+      <ReportCharts
+        usageData={usageData}
+        trendData={trendData}
+        stockDistribution={stockDistribution}
+        csvData={csvData}
+      />
+    </div>
   )
 }

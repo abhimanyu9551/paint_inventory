@@ -1,7 +1,6 @@
-"use client"
-
-import { useAuth } from "@/lib/auth-context"
-import { paints, suppliers, transactions, getLowStockPaints, getRecentTransactions, getUserById } from "@/lib/data"
+import { redirect } from "next/navigation"
+import { getSessionUser } from "@/lib/supabase/server"
+import { getPaints, getSuppliers, getTransactions, getLowStockPaints, getRecentTransactions, getUsers } from "@/lib/data"
 import { DashboardCards } from "@/components/dashboard-cards"
 import { DashboardOverviewChart } from "@/components/dashboard-overview-chart"
 import { RecentTransactions } from "@/components/recent-transactions"
@@ -9,12 +8,18 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import Link from "next/link"
 
-export default function DashboardPage() {
-  const { user } = useAuth()
-  if (!user) return null
+export default async function DashboardPage() {
+  const user = await getSessionUser()
+  if (!user) redirect("/login")
 
-  const lowStockPaints = getLowStockPaints()
-  const recentTxs = getRecentTransactions(8)
+  const [paints, suppliers, transactions, lowStockPaints, recentTxs, users] = await Promise.all([
+    getPaints(),
+    getSuppliers(),
+    getTransactions(),
+    getLowStockPaints(),
+    getRecentTransactions(8),
+    getUsers(),
+  ])
 
   const chartMap = new Map<string, { consumed: number; restocked: number }>()
   for (const tx of transactions) {
@@ -32,7 +37,7 @@ export default function DashboardPage() {
 
   const formattedTxs = recentTxs.map((tx) => {
     const paint = paints.find((p) => p.id === tx.paintId)
-    const performedByUser = getUserById(tx.performedBy)
+    const performedByUser = users.find((u) => u.id === tx.performedBy)
     return {
       id: tx.id,
       paintName: paint?.name || "Unknown",

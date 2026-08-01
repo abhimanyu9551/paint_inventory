@@ -1,176 +1,255 @@
 "use server"
 
-import {
-  paints,
-  suppliers,
-  users,
-  transactions,
-  alerts,
-  generateId,
-  getPaintById,
-  getSupplierById,
-} from "./data"
+import { revalidatePath } from "next/cache"
+import { createClient, getSessionUser } from "@/lib/supabase/server"
+import { createAdminClient } from "@/lib/supabase/admin"
+import { getPaintById, getSupplierById } from "./data"
 import type { FinishType, UserRole } from "./types"
+
+// Every Server Action is a network-callable endpoint once its reference ships
+// to the client, regardless of which page renders the button that calls it -
+// so each mutation re-checks the caller's role here rather than trusting the
+// page-level UI gating.
+async function requireRole(allowedRoles: UserRole[]) {
+  const user = await getSessionUser()
+  if (!user) return { error: "Not authenticated" }
+  if (!allowedRoles.includes(user.role)) return { error: "You don't have permission to perform this action" }
+  return { error: null }
+}
 
 // --- PAINT ACTIONS ---
 
 export async function addPaint(formData: FormData) {
-  const paint = {
-    id: generateId("p"),
+  const auth = await requireRole(["admin"])
+  if (auth.error) return { error: auth.error }
+
+  const supabase = await createClient()
+  const { error } = await supabase.from("paints").insert({
     name: formData.get("name") as string,
-    colorHex: formData.get("colorHex") as string,
-    finishType: formData.get("finishType") as FinishType,
+    color_hex: formData.get("colorHex") as string,
+    finish_type: formData.get("finishType") as FinishType,
     brand: formData.get("brand") as string,
     stock: parseInt(formData.get("stock") as string) || 0,
     threshold: parseInt(formData.get("threshold") as string) || 10,
-    supplierId: formData.get("supplierId") as string,
-    createdAt: new Date().toISOString(),
-  }
+    supplier_id: formData.get("supplierId") as string,
+  })
 
-  paints.push(paint)
+  if (error) return { error: error.message }
+  revalidatePath("/dashboard")
   return { success: true }
 }
 
 export async function updatePaint(paintId: string, formData: FormData) {
-  const paint = paints.find((p) => p.id === paintId)
-  if (!paint) return { error: "Paint not found" }
+  const auth = await requireRole(["admin"])
+  if (auth.error) return { error: auth.error }
 
-  paint.name = (formData.get("name") as string) || paint.name
-  paint.colorHex = (formData.get("colorHex") as string) || paint.colorHex
-  paint.finishType = (formData.get("finishType") as FinishType) || paint.finishType
-  paint.brand = (formData.get("brand") as string) || paint.brand
-  paint.threshold = parseInt(formData.get("threshold") as string) || paint.threshold
-  paint.supplierId = (formData.get("supplierId") as string) || paint.supplierId
+  const supabase = await createClient()
+  const { error } = await supabase
+    .from("paints")
+    .update({
+      name: formData.get("name") as string,
+      color_hex: formData.get("colorHex") as string,
+      finish_type: formData.get("finishType") as FinishType,
+      brand: formData.get("brand") as string,
+      threshold: parseInt(formData.get("threshold") as string) || undefined,
+      supplier_id: formData.get("supplierId") as string,
+    })
+    .eq("id", paintId)
 
+  if (error) return { error: error.message }
+  revalidatePath("/dashboard")
   return { success: true }
 }
 
 export async function deletePaint(paintId: string) {
-  const index = paints.findIndex((p) => p.id === paintId)
-  if (index === -1) return { error: "Paint not found" }
+  const auth = await requireRole(["admin"])
+  if (auth.error) return { error: auth.error }
 
-  paints.splice(index, 1)
+  const supabase = await createClient()
+  const { error } = await supabase.from("paints").delete().eq("id", paintId)
+
+  if (error) return { error: error.message }
+  revalidatePath("/dashboard")
   return { success: true }
 }
 
-export async function adjustStock(paintId: string, type: "ADD" | "REMOVE", quantity: number, userId: string, note?: string) {
-  const paint = getPaintById(paintId)
+export async function adjustStock(
+  paintId: string,
+  type: "ADD" | "REMOVE",
+  quantity: number,
+  userId: string,
+  note?: string
+) {
+  const auth = await requireRole(["admin", "supervisor", "user"])
+  if (auth.error) return { error: auth.error }
+
+  const paint = await getPaintById(paintId)
   if (!paint) return { error: "Paint not found" }
 
   if (type === "REMOVE" && paint.stock < quantity) {
     return { error: "Insufficient stock" }
   }
 
-  if (type === "ADD") {
-    paint.stock += quantity
-  } else {
-    paint.stock -= quantity
-  }
+  const newStock = type === "ADD" ? paint.stock + quantity : paint.stock - quantity
 
-  transactions.push({
-    id: generateId("t"),
-    paintId,
+  const supabase = await createClient()
+
+  const { error: stockError } = await supabase.from("paints").update({ stock: newStock }).eq("id", paintId)
+  if (stockError) return { error: stockError.message }
+
+  const { error: txError } = await supabase.from("stock_transactions").insert({
+    paint_id: paintId,
     type,
     quantity,
-    performedBy: userId,
-    date: new Date().toISOString(),
+    performed_by: userId,
     note,
   })
+  if (txError) return { error: txError.message }
 
   // Check if stock is below threshold after removal
-  if (type === "REMOVE" && paint.stock <= paint.threshold) {
-    const supplier = getSupplierById(paint.supplierId)
-    alerts.push({
-      id: generateId("a"),
-      paintId,
-      message: `${paint.name} stock is low (${paint.stock} units, threshold: ${paint.threshold})${supplier ? `. Contact ${supplier.name} at ${supplier.phone}` : ""}`,
+  if (type === "REMOVE" && newStock <= paint.threshold) {
+    const supplier = await getSupplierById(paint.supplierId)
+    await supabase.from("alerts").insert({
+      paint_id: paintId,
+      message: `${paint.name} stock is low (${newStock} units, threshold: ${paint.threshold})${supplier ? `. Contact ${supplier.name} at ${supplier.phone}` : ""}`,
       resolved: false,
-      createdAt: new Date().toISOString(),
     })
-    return { success: true, lowStock: true, paintName: paint.name, stock: paint.stock, threshold: paint.threshold }
+    revalidatePath("/dashboard")
+    return { success: true, lowStock: true, paintName: paint.name, stock: newStock, threshold: paint.threshold }
   }
 
+  revalidatePath("/dashboard")
   return { success: true }
 }
 
 // --- SUPPLIER ACTIONS ---
 
 export async function addSupplier(formData: FormData) {
-  suppliers.push({
-    id: generateId("s"),
+  const auth = await requireRole(["admin"])
+  if (auth.error) return { error: auth.error }
+
+  const supabase = await createClient()
+  const { error } = await supabase.from("suppliers").insert({
     name: formData.get("name") as string,
     email: formData.get("email") as string,
     phone: formData.get("phone") as string,
     address: formData.get("address") as string,
-    leadTimeDays: parseInt(formData.get("leadTimeDays") as string) || 3,
+    lead_time_days: parseInt(formData.get("leadTimeDays") as string) || 3,
   })
 
+  if (error) return { error: error.message }
+  revalidatePath("/dashboard")
   return { success: true }
 }
 
 export async function updateSupplier(supplierId: string, formData: FormData) {
-  const supplier = suppliers.find((s) => s.id === supplierId)
-  if (!supplier) return { error: "Supplier not found" }
+  const auth = await requireRole(["admin"])
+  if (auth.error) return { error: auth.error }
 
-  supplier.name = (formData.get("name") as string) || supplier.name
-  supplier.email = (formData.get("email") as string) || supplier.email
-  supplier.phone = (formData.get("phone") as string) || supplier.phone
-  supplier.address = (formData.get("address") as string) || supplier.address
-  supplier.leadTimeDays = parseInt(formData.get("leadTimeDays") as string) || supplier.leadTimeDays
+  const supabase = await createClient()
+  const { error } = await supabase
+    .from("suppliers")
+    .update({
+      name: formData.get("name") as string,
+      email: formData.get("email") as string,
+      phone: formData.get("phone") as string,
+      address: formData.get("address") as string,
+      lead_time_days: parseInt(formData.get("leadTimeDays") as string) || undefined,
+    })
+    .eq("id", supplierId)
 
+  if (error) return { error: error.message }
+  revalidatePath("/dashboard")
   return { success: true }
 }
 
 export async function deleteSupplier(supplierId: string) {
-  const index = suppliers.findIndex((s) => s.id === supplierId)
-  if (index === -1) return { error: "Supplier not found" }
+  const auth = await requireRole(["admin"])
+  if (auth.error) return { error: auth.error }
 
-  suppliers.splice(index, 1)
+  const supabase = await createClient()
+  const { error } = await supabase.from("suppliers").delete().eq("id", supplierId)
+
+  if (error) return { error: error.message }
+  revalidatePath("/dashboard")
   return { success: true }
 }
 
-// --- USER ACTIONS ---
+// --- USER ACTIONS (real Supabase Auth accounts) ---
 
 export async function addUser(formData: FormData) {
-  users.push({
-    id: generateId("u"),
-    name: formData.get("name") as string,
-    email: formData.get("email") as string,
-    password: formData.get("password") as string,
-    role: formData.get("role") as UserRole,
-    createdAt: new Date().toISOString(),
+  const auth = await requireRole(["admin"])
+  if (auth.error) return { error: auth.error }
+
+  const name = formData.get("name") as string
+  const email = formData.get("email") as string
+  const password = formData.get("password") as string
+  const role = formData.get("role") as UserRole
+
+  const admin = createAdminClient()
+  const { error } = await admin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: { name, role },
   })
 
+  if (error) return { error: error.message }
+  revalidatePath("/dashboard/users")
   return { success: true }
 }
 
 export async function updateUser(userId: string, formData: FormData) {
-  const user = users.find((u) => u.id === userId)
-  if (!user) return { error: "User not found" }
+  const auth = await requireRole(["admin"])
+  if (auth.error) return { error: auth.error }
 
-  user.name = (formData.get("name") as string) || user.name
-  user.email = (formData.get("email") as string) || user.email
-  user.role = (formData.get("role") as UserRole) || user.role
+  const name = formData.get("name") as string
+  const email = formData.get("email") as string
+  const role = formData.get("role") as UserRole
   const password = formData.get("password") as string
-  if (password) user.password = password
 
+  const admin = createAdminClient()
+
+  const authUpdate: { email?: string; password?: string } = {}
+  if (email) authUpdate.email = email
+  if (password) authUpdate.password = password
+  if (Object.keys(authUpdate).length > 0) {
+    const { error } = await admin.auth.admin.updateUserById(userId, authUpdate)
+    if (error) return { error: error.message }
+  }
+
+  const { error: profileError } = await admin
+    .from("profiles")
+    .update({ name, email, role })
+    .eq("id", userId)
+
+  if (profileError) return { error: profileError.message }
+  revalidatePath("/dashboard/users")
   return { success: true }
 }
 
 export async function deleteUser(userId: string) {
-  const index = users.findIndex((u) => u.id === userId)
-  if (index === -1) return { error: "User not found" }
+  const auth = await requireRole(["admin"])
+  if (auth.error) return { error: auth.error }
 
-  users.splice(index, 1)
+  const admin = createAdminClient()
+  const { error } = await admin.auth.admin.deleteUser(userId)
+
+  if (error) return { error: error.message }
+  revalidatePath("/dashboard/users")
   return { success: true }
 }
 
 // --- ALERT ACTIONS ---
 
 export async function resolveAlert(alertId: string) {
-  const alert = alerts.find((a) => a.id === alertId)
-  if (!alert) return { error: "Alert not found" }
+  const auth = await requireRole(["admin", "supervisor"])
+  if (auth.error) return { error: auth.error }
 
-  alert.resolved = true
+  const supabase = await createClient()
+  const { error } = await supabase.from("alerts").update({ resolved: true }).eq("id", alertId)
+
+  if (error) return { error: error.message }
+  revalidatePath("/dashboard")
   return { success: true }
 }
