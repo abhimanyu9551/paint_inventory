@@ -17,6 +17,15 @@ async function requireRole(allowedRoles: UserRole[]) {
   return { error: null }
 }
 
+// `parseInt(...) || fallback` treats an explicitly entered 0 the same as an
+// empty/invalid field, silently discarding it - this parses to a real number
+// and only falls back when the input is genuinely missing or not a number.
+function parseIntOrDefault(value: FormDataEntryValue | null, fallback: number): number {
+  if (value === null || value === "") return fallback
+  const parsed = parseInt(value as string, 10)
+  return Number.isNaN(parsed) ? fallback : parsed
+}
+
 // --- PAINT ACTIONS ---
 
 export async function addPaint(formData: FormData) {
@@ -29,8 +38,8 @@ export async function addPaint(formData: FormData) {
     color_hex: formData.get("colorHex") as string,
     finish_type: formData.get("finishType") as FinishType,
     brand: formData.get("brand") as string,
-    stock: parseInt(formData.get("stock") as string) || 0,
-    threshold: parseInt(formData.get("threshold") as string) || 10,
+    stock: parseIntOrDefault(formData.get("stock"), 0),
+    threshold: parseIntOrDefault(formData.get("threshold"), 10),
     supplier_id: formData.get("supplierId") as string,
   })
 
@@ -43,16 +52,19 @@ export async function updatePaint(paintId: string, formData: FormData) {
   const auth = await requireRole(["admin"])
   if (auth.error) return { error: auth.error }
 
+  const existing = await getPaintById(paintId)
+  if (!existing) return { error: "Paint not found" }
+
   const supabase = await createClient()
   const { error } = await supabase
     .from("paints")
     .update({
-      name: formData.get("name") as string,
-      color_hex: formData.get("colorHex") as string,
-      finish_type: formData.get("finishType") as FinishType,
-      brand: formData.get("brand") as string,
-      threshold: parseInt(formData.get("threshold") as string) || undefined,
-      supplier_id: formData.get("supplierId") as string,
+      name: (formData.get("name") as string) || existing.name,
+      color_hex: (formData.get("colorHex") as string) || existing.colorHex,
+      finish_type: (formData.get("finishType") as FinishType) || existing.finishType,
+      brand: (formData.get("brand") as string) || existing.brand,
+      threshold: parseIntOrDefault(formData.get("threshold"), existing.threshold),
+      supplier_id: (formData.get("supplierId") as string) || existing.supplierId,
     })
     .eq("id", paintId)
 
@@ -83,43 +95,33 @@ export async function adjustStock(
   const auth = await requireRole(["admin", "supervisor", "user"])
   if (auth.error) return { error: auth.error }
 
-  const paint = await getPaintById(paintId)
-  if (!paint) return { error: "Paint not found" }
-
-  if (type === "REMOVE" && paint.stock < quantity) {
-    return { error: "Insufficient stock" }
-  }
-
-  const newStock = type === "ADD" ? paint.stock + quantity : paint.stock - quantity
-
   const supabase = await createClient()
 
-  const { error: stockError } = await supabase.from("paints").update({ stock: newStock }).eq("id", paintId)
-  if (stockError) return { error: stockError.message }
-
-  const { error: txError } = await supabase.from("stock_transactions").insert({
-    paint_id: paintId,
-    type,
-    quantity,
-    performed_by: userId,
-    note,
+  // adjust_stock runs the read, stock update, transaction insert, and
+  // dedup'd alert insert as one atomic transaction with the paint row
+  // locked for its duration - see supabase/adjust-stock-rpc.sql.
+  const { data, error } = await supabase.rpc("adjust_stock", {
+    p_paint_id: paintId,
+    p_type: type,
+    p_quantity: quantity,
+    p_user_id: userId,
+    p_note: note ?? null,
   })
-  if (txError) return { error: txError.message }
 
-  // Check if stock is below threshold after removal
-  if (type === "REMOVE" && newStock <= paint.threshold) {
-    const supplier = await getSupplierById(paint.supplierId)
-    await supabase.from("alerts").insert({
-      paint_id: paintId,
-      message: `${paint.name} stock is low (${newStock} units, threshold: ${paint.threshold})${supplier ? `. Contact ${supplier.name} at ${supplier.phone}` : ""}`,
-      resolved: false,
-    })
-    revalidatePath("/dashboard")
-    return { success: true, lowStock: true, paintName: paint.name, stock: newStock, threshold: paint.threshold }
+  if (error) {
+    if (error.message.includes("Insufficient stock")) return { error: "Insufficient stock" }
+    if (error.message.includes("Paint not found")) return { error: "Paint not found" }
+    return { error: error.message }
   }
 
   revalidatePath("/dashboard")
-  return { success: true }
+  return {
+    success: true,
+    lowStock: data.lowStock,
+    paintName: data.paintName,
+    stock: data.newStock,
+    threshold: data.threshold,
+  }
 }
 
 // --- SUPPLIER ACTIONS ---
@@ -134,7 +136,7 @@ export async function addSupplier(formData: FormData) {
     email: formData.get("email") as string,
     phone: formData.get("phone") as string,
     address: formData.get("address") as string,
-    lead_time_days: parseInt(formData.get("leadTimeDays") as string) || 3,
+    lead_time_days: parseIntOrDefault(formData.get("leadTimeDays"), 3),
   })
 
   if (error) return { error: error.message }
@@ -146,15 +148,18 @@ export async function updateSupplier(supplierId: string, formData: FormData) {
   const auth = await requireRole(["admin"])
   if (auth.error) return { error: auth.error }
 
+  const existing = await getSupplierById(supplierId)
+  if (!existing) return { error: "Supplier not found" }
+
   const supabase = await createClient()
   const { error } = await supabase
     .from("suppliers")
     .update({
-      name: formData.get("name") as string,
-      email: formData.get("email") as string,
-      phone: formData.get("phone") as string,
-      address: formData.get("address") as string,
-      lead_time_days: parseInt(formData.get("leadTimeDays") as string) || undefined,
+      name: (formData.get("name") as string) || existing.name,
+      email: (formData.get("email") as string) || existing.email,
+      phone: (formData.get("phone") as string) || existing.phone,
+      address: (formData.get("address") as string) || existing.address,
+      lead_time_days: parseIntOrDefault(formData.get("leadTimeDays"), existing.leadTimeDays),
     })
     .eq("id", supplierId)
 

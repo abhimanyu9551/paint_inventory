@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test:rls": "node --env-file=.env.local supabase/verify-rls.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
