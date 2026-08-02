@@ -1,9 +1,13 @@
-"use client"
-
-import { paints } from "@/lib/data"
+import { redirect } from "next/navigation"
+import { getSessionUser } from "@/lib/supabase/server"
+import { getPaints } from "@/lib/data"
 import { ConsumeGrid } from "@/components/consume-grid"
 
-export default function ConsumePage() {
+export default async function ConsumePage() {
+  const user = await getSessionUser()
+  if (!user) redirect("/login")
+
+  const paints = await getPaints()
   const paintItems = paints.map((p) => ({
     id: p.id,
     name: p.name,

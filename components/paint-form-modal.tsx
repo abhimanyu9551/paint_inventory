@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useTransition } from "react"
+import { useEffect, useState, useTransition } from "react"
 import { useRouter } from "next/navigation"
 import {
   Dialog,
@@ -45,6 +45,20 @@ export function PaintFormModal({ open, onOpenChange, paint, suppliers }: PaintFo
   const [stock, setStock] = useState(String(paint?.stock || 0))
   const [threshold, setThreshold] = useState(String(paint?.threshold || 10))
   const [supplierId, setSupplierId] = useState(paint?.supplierId || "")
+
+  // This modal is mounted once by its parent and reused for every Add/Edit
+  // open, so the useState initializers above only run on first mount -
+  // resync the form fields from `paint` every time the dialog opens.
+  useEffect(() => {
+    if (!open) return
+    setName(paint?.name || "")
+    setColorHex(paint?.colorHex || "#3B82F6")
+    setFinishType(paint?.finishType || "Matte")
+    setBrand(paint?.brand || "")
+    setStock(String(paint?.stock || 0))
+    setThreshold(String(paint?.threshold || 10))
+    setSupplierId(paint?.supplierId || "")
+  }, [open, paint])
 
   function handleSubmit() {
     if (!name || !brand || !supplierId) {
